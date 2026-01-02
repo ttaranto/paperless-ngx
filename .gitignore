@@ -1,0 +1,22 @@
+# PostgreSQL data directory
+postgres-data/
+
+# Let's Encrypt certificates
+certbot/
+
+# Environment file with secrets
+.env
+
+# Redis data
+redis-data/
+
+# Backup files
+backups/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
