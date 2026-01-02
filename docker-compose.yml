@@ -108,6 +108,7 @@ services:
 
       # Localization
       PAPERLESS_TIME_ZONE: ${PAPERLESS_TIME_ZONE:-America/Sao_Paulo}
+      PAPERLESS_OCR_LANGUAGES: ${PAPERLESS_OCR_LANGUAGES:-por}
       PAPERLESS_OCR_LANGUAGE: ${PAPERLESS_OCR_LANGUAGE:-por+eng}
 
       # User mapping for file permissions
