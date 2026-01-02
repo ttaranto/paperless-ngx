@@ -110,7 +110,7 @@ services:
       # Database Configuration
       PAPERLESS_DBENGINE: postgresql
       PAPERLESS_DBHOST: postgres
-      PAPERLESS_DBPORT: 5432
+      PAPERLESS_DBPORT: ${POSTGRES_PORT:-5432}
       PAPERLESS_DBNAME: ${POSTGRES_DB:-paperless}
       PAPERLESS_DBUSER: ${POSTGRES_USER:-paperless}
       PAPERLESS_DBPASS: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
