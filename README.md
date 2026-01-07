@@ -68,14 +68,19 @@ nano .env
 ```bash
 cd scripts
 chmod +x *.sh
-./init-letsencrypt.sh
+sudo ./init-letsencrypt.sh
 ```
 
 O script irá:
-1. Criar certificado temporário
-2. Iniciar Nginx
-3. Solicitar certificado real do Let's Encrypt
-4. Recarregar Nginx com certificado válido
+1. Criar config temporária do Nginx (HTTP + ACME)
+2. Solicitar certificado real do Let's Encrypt via webroot
+3. Trocar para a config completa com SSL
+4. Configurar renovação automática via cron
+
+Pré-requisitos:
+- DNS apontando para o IP do servidor
+- Nginx e certbot instalados no host
+- `PAPERLESS_PORT` correto no `.env` (porta que o app expõe no host)
 
 ### 5. Iniciar todos os serviços
 
