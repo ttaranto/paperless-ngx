@@ -1,7 +1,7 @@
 #!/bin/bash
 # init-letsencrypt.sh
 # Initialize Let's Encrypt SSL certificates for Paperless-ngx
-# Based on: https://github.com/wmnnd/nginx-certbot
+# Mirrors the Kurumin Agua webroot + temp Nginx config flow
 
 set -e
 
@@ -12,40 +12,56 @@ elif [ -f .env ]; then
     source .env
 fi
 
-# Configuration
-DOMAIN="${SSL_DOMAIN:-paperless.taranto.ai}"
-EMAIL="${SSL_EMAIL:-}"
-STAGING="${SSL_STAGING:-0}"
-RSA_KEY_SIZE=4096
-
 # Paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-CERTBOT_PATH="$PROJECT_DIR/certbot"
+NGINX_TEMPLATE="$PROJECT_DIR/nginx/conf.d/paperless.conf"
+NGINX_SITE_NAME="paperless"
+NGINX_AVAILABLE="/etc/nginx/sites-available/$NGINX_SITE_NAME"
+NGINX_ENABLED="/etc/nginx/sites-enabled/$NGINX_SITE_NAME"
+NGINX_TEMP="/etc/nginx/sites-available/${NGINX_SITE_NAME}-temp"
+
+# Configuration
+DOMAIN="${SSL_DOMAIN:-}"
+if [ -z "$DOMAIN" ] && [ -n "$PAPERLESS_URL" ]; then
+    DOMAIN="${PAPERLESS_URL#http://}"
+    DOMAIN="${DOMAIN#https://}"
+    DOMAIN="${DOMAIN%%/*}"
+fi
+DOMAIN="${DOMAIN:-paperless.taranto.ai}"
+
+EMAIL="${SSL_EMAIL:-${PAPERLESS_ADMIN_MAIL:-admin@$DOMAIN}}"
+STAGING="${SSL_STAGING:-0}"
+APP_PORT="${PAPERLESS_PORT:-8085}"
 
 echo "==================================================="
 echo "Paperless-ngx Let's Encrypt Certificate Setup"
 echo "==================================================="
 echo "Domain: $DOMAIN"
-echo "Email: ${EMAIL:-'(not set - will use --register-unsafely-without-email)'}"
+echo "Email: $EMAIL"
 echo "Staging: $STAGING"
+echo "App Port: $APP_PORT"
 echo "Project Directory: $PROJECT_DIR"
 echo "==================================================="
 
-# Check if email is set
-if [ -z "$EMAIL" ]; then
-    echo ""
-    echo "WARNING: No email set. Certificate expiry notifications won't be sent."
-    echo "Set SSL_EMAIL in your .env file to receive notifications."
-    echo ""
-    read -p "Continue without email? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        exit 1
-    fi
-    EMAIL_ARG="--register-unsafely-without-email"
-else
-    EMAIL_ARG="--email $EMAIL"
+if [ "$EUID" -ne 0 ]; then
+    echo "Please run this script with sudo or as root."
+    exit 1
+fi
+
+if ! command -v nginx >/dev/null 2>&1; then
+    echo "nginx not found. Install it before running this script."
+    exit 1
+fi
+
+if ! command -v certbot >/dev/null 2>&1; then
+    echo "certbot not found. Install it before running this script."
+    exit 1
+fi
+
+if [ ! -f "$NGINX_TEMPLATE" ]; then
+    echo "Nginx template not found at $NGINX_TEMPLATE"
+    exit 1
 fi
 
 # Staging flag
@@ -56,91 +72,80 @@ else
     STAGING_ARG=""
 fi
 
-# Create required directories
 echo ""
 echo "Creating directories..."
-mkdir -p "$CERTBOT_PATH/conf"
-mkdir -p "$CERTBOT_PATH/www"
+mkdir -p /var/www/certbot
 
-# Download recommended TLS parameters
-if [ ! -f "$CERTBOT_PATH/conf/options-ssl-nginx.conf" ]; then
-    echo "Downloading recommended SSL parameters..."
-    curl -s https://raw.githubusercontent.com/certbot/certbot/master/certbot-nginx/certbot_nginx/_internal/tls_configs/options-ssl-nginx.conf > "$CERTBOT_PATH/conf/options-ssl-nginx.conf"
-fi
-
-if [ ! -f "$CERTBOT_PATH/conf/ssl-dhparams.pem" ]; then
-    echo "Downloading DH parameters..."
-    curl -s https://raw.githubusercontent.com/certbot/certbot/master/certbot/certbot/ssl-dhparams.pem > "$CERTBOT_PATH/conf/ssl-dhparams.pem"
-fi
-
-# Check if certificates already exist
-if [ -d "$CERTBOT_PATH/conf/live/$DOMAIN" ]; then
-    echo ""
-    echo "Existing certificates found for $DOMAIN"
-    read -p "Replace existing certificates? [y/N] " -n 1 -r
-    echo
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Keeping existing certificates."
-        exit 0
-    fi
-fi
-
-# Create dummy certificate for nginx to start
 echo ""
-echo "Creating dummy certificate for nginx..."
-CERT_PATH="$CERTBOT_PATH/conf/live/$DOMAIN"
-mkdir -p "$CERT_PATH"
+echo "Configuring Nginx template..."
+cp "$NGINX_TEMPLATE" "$NGINX_AVAILABLE"
+sed -i "s/DOMAIN_NAME/$DOMAIN/g" "$NGINX_AVAILABLE"
+sed -i "s/APP_PORT/$APP_PORT/g" "$NGINX_AVAILABLE"
 
-docker compose -f "$PROJECT_DIR/docker-compose.yml" run --rm --entrypoint "\
-    openssl req -x509 -nodes -newkey rsa:$RSA_KEY_SIZE -days 1 \
-    -keyout '/etc/letsencrypt/live/$DOMAIN/privkey.pem' \
-    -out '/etc/letsencrypt/live/$DOMAIN/fullchain.pem' \
-    -subj '/CN=localhost'" certbot
-
-# Create chain.pem (copy of fullchain for OCSP)
-cp "$CERT_PATH/fullchain.pem" "$CERT_PATH/chain.pem" 2>/dev/null || true
-
-# Start nginx
 echo ""
-echo "Starting nginx..."
-docker compose -f "$PROJECT_DIR/docker-compose.yml" up -d nginx
+echo "Creating temporary Nginx config for ACME challenge..."
+cat > "$NGINX_TEMP" << EOF
+server {
+    listen 80;
+    server_name $DOMAIN;
 
-# Wait for nginx to be ready
-echo "Waiting for nginx to start..."
-sleep 5
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
 
-# Delete dummy certificate
+    location / {
+        return 200 'Server is being configured...';
+        add_header Content-Type text/plain;
+    }
+}
+EOF
+
+ln -sf "$NGINX_TEMP" "$NGINX_ENABLED"
+rm -f /etc/nginx/sites-enabled/default
+
+echo "Testing nginx configuration..."
+nginx -t && systemctl restart nginx
+
 echo ""
-echo "Deleting dummy certificate..."
-docker compose -f "$PROJECT_DIR/docker-compose.yml" run --rm --entrypoint "\
-    rm -rf /etc/letsencrypt/live/$DOMAIN && \
-    rm -rf /etc/letsencrypt/archive/$DOMAIN && \
-    rm -rf /etc/letsencrypt/renewal/$DOMAIN.conf" certbot
-
-# Request real certificate
+echo "Obtaining SSL certificate..."
+echo "Make sure your domain ($DOMAIN) points to this server's IP."
 echo ""
-echo "Requesting Let's Encrypt certificate..."
-docker compose -f "$PROJECT_DIR/docker-compose.yml" run --rm --entrypoint "\
-    certbot certonly --webroot -w /var/www/certbot \
+read -p "Press Enter when DNS is configured, or Ctrl+C to abort..."
+
+certbot certonly --webroot -w /var/www/certbot \
+    -d "$DOMAIN" \
     $STAGING_ARG \
-    $EMAIL_ARG \
-    -d $DOMAIN \
-    --rsa-key-size $RSA_KEY_SIZE \
+    --non-interactive \
     --agree-tos \
-    --force-renewal" certbot
+    --email "$EMAIL" || {
+    echo "Failed to obtain SSL certificate."
+    echo "Make sure:"
+    echo "  1. Domain $DOMAIN points to this server's IP"
+    echo "  2. Port 80 is accessible from the internet"
+    echo ""
+    echo "You can retry SSL setup later with:"
+    echo "  certbot certonly --webroot -w /var/www/certbot -d $DOMAIN"
+    echo ""
+    echo "Continuing without SSL for now..."
+}
 
-# Reload nginx with real certificate
-echo ""
-echo "Reloading nginx with valid certificate..."
-docker compose -f "$PROJECT_DIR/docker-compose.yml" exec nginx nginx -s reload
+if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    ln -sf "$NGINX_AVAILABLE" "$NGINX_ENABLED"
+    rm -f "$NGINX_TEMP"
+    nginx -t && systemctl restart nginx
+    echo "SSL certificate installed successfully"
+
+    echo "0 0,12 * * * root certbot renew --quiet" > /etc/cron.d/certbot-renew
+    echo "SSL auto-renewal configured"
+else
+    echo "Running without SSL. Configure it later."
+fi
 
 echo ""
 echo "==================================================="
-echo "SSL certificate successfully obtained!"
+echo "Setup complete!"
 echo "==================================================="
 echo ""
 echo "Your Paperless-ngx instance should now be accessible at:"
 echo "https://$DOMAIN"
-echo ""
-echo "Certificate will auto-renew via the certbot container."
 echo ""
